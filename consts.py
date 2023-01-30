@@ -96,8 +96,7 @@ TEM = 0x01
 @dataclass
 class HuffmanTable:
     symbol_counts: Tuple = field(default_factory=tuple)
-    symbols: Dict[int, Tuple] = field(default_factory=dict)
-    codes: np.ndarray = field(default_factory=lambda: np.empty(172))# 172
+    symbols: Dict[Tuple[int, int], int] = field(default_factory=dict)  # key为code长度和code的uint整形
 
 @dataclass
 class ColorComponent:
