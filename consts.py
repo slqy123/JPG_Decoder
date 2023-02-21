@@ -109,32 +109,11 @@ class ColorComponent:
     used_in_scan = False
 
 
-# class Block:
-#     union {
-#         int y[64] = { 0 }
-#         int r[64]
-#     }
-#     union {
-#         int cb[64] = { 0 }
-#         int g [64]
-#     }
-#     union {
-#         int cr[64] = { 0 }
-#         int b [64]
-#     }
-#     int* operator[](i) {
-#         switch (i) {
-#             case 0:
-#                 return y
-#             case 1:
-#                 return cb
-#             case 2:
-#                 return cr
-#             default:
-#                 return nullptr
-#         }
-#     }
-
+YCbCr2RG = np.array([
+    [1, 0, 1.402],
+    [1, -0.344, -0.714],
+    [1, 1.772, 0]
+    ])
 
 # class JPGImage:
 #     QuantizationTable quantizationTables[4]

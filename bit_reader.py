@@ -30,6 +30,3 @@ class BitReader:
             self.c_bit = 0
             self.c_byte += 1
 
-
-
-

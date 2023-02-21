@@ -19,14 +19,15 @@ class JPGImage:
 
         self.sof_flag = False
 
-        self.quantization_tables = np.empty((4, 8, 8), dtype=np.uint16)
-        self.quantization_tables_mask = [False] * 4
+        # self.quantization_tables = np.empty((4, 8, 8), dtype=np.uint16)
+        # self.quantization_tables_mask = [False] * 4
+        self.quantization_tables: Dict[int, np.ndarray] = {}
 
         self.width: int
         self.height: int
         self.mcus: Optional[np.ndarray] = None
 
-        self.color_components: Dict[int, ColorComponent] = {}
+        self.color_components: Dict[int, ColorComponent] = {}  # id 是从1开始的
         self.components_num: int
 
         self.huffman_tables_DC: Dict[int, HuffmanTable] = {}
@@ -41,9 +42,14 @@ class JPGImage:
 
         self.restart_interval = None
 
+    def run(self):
         self.read_header()
         self.read_data()
         self.decode_huffman_data()
+        self.dequantize_mcu()
+        self.inverse_DCT()
+        self.color_convertion()
+        print('over')
     
     @staticmethod
     def divide(b: int) -> Tuple[int, int]:
@@ -69,7 +75,7 @@ class JPGImage:
         assert 0 <= table_id < 4  # 最多只能有四个量化表
         table_size = table_type * 64 + 64  # 整个量化表的长度，因为一共8x8的元素，每个元素占一个或两个字节
         
-        self.quantization_tables_mask[table_id] = True
+        # self.quantization_tables_mask[table_id] = True
         if table_type == 0:
             array = np.array(struct.unpack('B'*64, self.f.read(64)))
             self.quantization_tables[table_id] = inverse_zigzag_single(array)
@@ -161,10 +167,9 @@ class JPGImage:
         self.comments.append(comment)
 
     def print_DQT_table(self):
-        for i in range(4):
-            if self.quantization_tables_mask[i]:
-                print(f'table id={i}:')
-                print(self.quantization_tables[i])
+        for qtable_id, table in self.quantization_tables.items():
+                print(f'quantization table id={qtable_id}:')
+                print(table)
     
     def print_SOF0(self):
         for i, item in self.color_components.items():
@@ -233,6 +238,9 @@ class JPGImage:
         self.print_DHT()
 
     def read_data(self):
+        """
+        每次读两个字节，因为其中可能会出现marker，而marker是以0xff开头，可能有的数据也会以0xff开头，为了表示区别，如果是数据0xff的话，将写做0xff0x00，因为这个marker是不存在的。
+        """
         next: int = struct.unpack('>B', self.f.read(1))[0]
         while True:
             current = next
@@ -258,11 +266,14 @@ class JPGImage:
                 exit(-1)
 
     def decode_huffman_data(self):
+        """
+        这部分是一个比特一个比特地读，因为是huffman编码，所以每读一个比特就要比较一下有没有匹配的(能否考虑用树来实现呢？)
+        """
         def read_symbol(htable: HuffmanTable):
             for i, code in zip(range(16), br.read_iter()):
                 if (key:=(i+1, code)) in htable.symbols:
                     # print("%d|%.2x" % (code, htable.symbols[key]), end=' ')
-                    return htable.symbols[key]
+                    return htable.symbols[key]  # 找到了对应的code便返回symbol，否则继续再读一个bit
             else:
                 print('failed to match any symbol')
                 exit(-1)
@@ -271,7 +282,7 @@ class JPGImage:
                 return 0
             coeff = br.read(length)
             if coeff < 2**(length-1):
-                coeff = coeff + 1 - 2**(length)
+                coeff = coeff + 1 - 2**(length)  # 为了让coefficient同时表示正数和负数，做如此处理
             return coeff
 
 
@@ -320,7 +331,7 @@ class JPGImage:
             # return res
             return inverse_zigzag_single(mcu)
 
-
+        print('Decoding MCU...')
         mcu_width = (self.width+7)//8
         mcu_height = (self.height+7)//8  # 8是最小单位，图片宽度不够要补全
         self.mcus = np.zeros((mcu_height, mcu_width, self.components_num, 8, 8), dtype=int)
@@ -333,7 +344,46 @@ class JPGImage:
                 previous_coeff4DC = {}
                 br.align()
             self.mcus[i, j, k] = decode_one_mcu(color_component_id=k+1)
-        print(np.max(self.mcus))
+        # print(np.max(self.mcus))
+
+    def dequantize_mcu(self):
+        print('Dequantizing mcu...')
+        assert isinstance(self.mcus, np.ndarray)
+        for i, j, k in product(*map(range, self.mcus.shape[:3])):
+            qtable_id = self.color_components[k+1].quantization_table_id
+            qtable = self.quantization_tables[qtable_id]
+            self.mcus[i, j, k] *= qtable
+
+    def inverse_DCT(self):
+        """
+        每个MCU最左上角的元素，也就是DC Table的元素，代表这个MCU的平均亮度(色度)
+        关于离散余弦变换的数学公式可以看 DCT.png
+        """
+        assert isinstance(self.mcus, np.ndarray)
+        print('Do inverse DCT')
+        C = np.ones(8); C[0] = 1/np.sqrt(2); C = np.outer(C, C)/4  # 最后结果乘上一个常数
+        # K = (np.arange(8)+.5)*np.pi/8  # cosine 函数里一些与xy无关的系数
+        # COS = np.array([np.cos(K*i) for i in range(8)]).T
+        K = np.arange(8) * np.pi / 8
+        COS = [np.cos((i+.5)*K) for i in range(8)]
+        COS = np.kron(COS, COS).reshape(8,8,8,8)
+        for i, j, k in product(*map(range, self.mcus.shape[:3])):
+            mcu = self.mcus[i, j, k]
+            res = np.sum(COS * mcu * C, axis=(2,3))
+            # res *= C
+            self.mcus[i, j, k] = res
+            # print(res, self.mcus[i,j,k])
+
+    def color_convertion(self):
+        """converte YCbCr to RGB"""
+        print('Converting from YCbCr...')
+        assert isinstance(self.mcus, np.ndarray)
+        # for i, j, u, v in product(*map(lambda i: range(self.mcus.shape[i]), (0, 1, 3, 4))):
+        #     res = YCbCr2RG @ self.mcus[i,j,:,u,v] + 128
+        #     self.mcus[i,j,:,u,v] = res
+        self.mcus = np.tensordot(YCbCr2RG, self.mcus, axes=((1,), (2,))).transpose(1, 2, 0, 3, 4).astype(int) + 128
+        self.mcus[self.mcus > 255] = 255
+        self.mcus[self.mcus < 0] = 0
 
     def save(self):
         assert isinstance(self.mcus, np.ndarray)
@@ -346,6 +396,7 @@ class JPGImage:
 def main(path):
     with open(path, 'rb') as f:
         jpg = JPGImage(f)
+        jpg.run()
         jpg.save()
 
 if __name__ == '__main__':
