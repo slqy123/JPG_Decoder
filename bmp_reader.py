@@ -55,7 +55,11 @@ def read_bmp(f):
     i.save('./out.png')
 
 def save_bmp(data: np.ndarray):
-    header = BitmapFileHeader(0x4d42, data.size+54, 0, 0, 54)
+    # 把长和宽扩大为最小的4的倍数
+    pad = (4 - (data.shape[1] * data.shape[2])%4)%4
+    extra_size = data.shape[0] * pad
+    print(pad, extra_size)
+    header = BitmapFileHeader(0x4d42, data.size+extra_size+54, 0, 0, 54)
     info = BItmapInformationHeader(40, data.shape[1], data.shape[0], 1, data.shape[2]*8, 0, data.size, 0, 0, 0, 0)
 
     header = astuple(header)
@@ -67,9 +71,10 @@ def save_bmp(data: np.ndarray):
     rev = [2,1,0]
     if rev == 4:
         rev.append(3)
-    data = data[::-1,:, rev]
+    data = data[::-1,:, rev].reshape(data.shape[0], -1)
+    data = np.pad(data, ((0,0), (0,pad)), mode='constant', constant_values=0)
 
-    print(data, data.dtype, np.max(data), np.min(data))
+    # print(data, data.dtype, np.max(data), np.min(data))
     raw_data = struct.pack('B'*data.size, *(data.flatten()%256))
 
     with open('out.bmp', 'wb') as f:

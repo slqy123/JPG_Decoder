@@ -29,6 +29,8 @@ class JPGImage:
 
         self.color_components: Dict[int, ColorComponent] = {}  # id 是从1开始的
         self.components_num: int
+        self.horizontal_sampling_factor = 1  # 全局的sampling factor
+        self.vertical_sampling_factor = 1
 
         self.huffman_tables_DC: Dict[int, HuffmanTable] = {}
         self.huffman_tables_AC: Dict[int, HuffmanTable] = {}
@@ -281,6 +283,7 @@ class JPGImage:
             if length == 0:
                 return 0
             coeff = br.read(length)
+            # print(coeff, end=' ')
             if coeff < 2**(length-1):
                 coeff = coeff + 1 - 2**(length)  # 为了让coefficient同时表示正数和负数，做如此处理
             return coeff
@@ -292,7 +295,7 @@ class JPGImage:
             ac_table_id = self.color_components[color_component_id].huffman_AC_table_id
             dc_table = self.huffman_tables_DC[dc_table_id]
             ac_table = self.huffman_tables_AC[ac_table_id]
-            mcu = np.empty(64, dtype=int)
+            mcu = np.zeros(64, dtype=int)
 
             dc_symbol = read_symbol(dc_table)
             assert dc_symbol <= 11
@@ -307,17 +310,13 @@ class JPGImage:
                 assert ac_symbol != 0xFF
                 if ac_symbol == 0x00:
                     # 结束了，后面全是零
-                    while i < 64:
-                        mcu[i] = 0
-                        i += 1
+                    i = 64
                 else:
                     zero_num, coeff_len = self.divide(ac_symbol)
                     if ac_symbol == 0xF0:  # 特殊符号，表示跳过16个，不读取任何一个
                         zero_num = 16
                     # 补充零
-                    for _ in range(zero_num):
-                        mcu[i] = 0
-                        i += 1
+                    i += zero_num
 
                     assert coeff_len < 11  # ac table 的长度不会超过10，但dc可以为11
                     if coeff_len > 0:
@@ -332,18 +331,38 @@ class JPGImage:
             return inverse_zigzag_single(mcu)
 
         print('Decoding MCU...')
+        # 计算图像的sampling
+        for component_id, component in self.color_components.items():
+            if component_id == 1:
+                assert component.horizontal_sampling_factor in (1,2) and component.vertical_sampling_factor in (1,2)
+                self.horizontal_sampling_factor = component.horizontal_sampling_factor
+                self.vertical_sampling_factor = component.vertical_sampling_factor
+            else:
+                assert component.horizontal_sampling_factor == 1 and component.vertical_sampling_factor == 1
+
+        # 根据sampling判断mcu的总大小
         mcu_width = (self.width+7)//8
         mcu_height = (self.height+7)//8  # 8是最小单位，图片宽度不够要补全
+        if self.horizontal_sampling_factor == 2 and mcu_width % 2 == 1:  # 如果sampling==2的话，就必须是偶数个，因为是2个2个编解码的
+            mcu_width += 1
+        if self.vertical_sampling_factor == 2 and mcu_height % 2 == 1:
+            mcu_height += 1
+
         self.mcus = np.zeros((mcu_height, mcu_width, self.components_num, 8, 8), dtype=int)
         previous_coeff4DC = {}  # 这里保存的是3个components里的上一个coeff的值，当前的coeff=之前的coeff+读取到的值
         br = BitReader(self.huffman_data)
 
-        for i, j, k in product(range(mcu_height), range(mcu_width), range(self.components_num)):
+        for i, j in product(range(0, mcu_height, self.vertical_sampling_factor), range(0, mcu_width, self.horizontal_sampling_factor)):
             if (self.restart_interval is not None) and ((i*mcu_width + j) % self.restart_interval == 0):
                 print('reset interval')
                 previous_coeff4DC = {}
                 br.align()
-            self.mcus[i, j, k] = decode_one_mcu(color_component_id=k+1)
+            for voff, hoff in product(range(self.vertical_sampling_factor), range(self.horizontal_sampling_factor)):
+                self.mcus[i+voff, j+hoff, 0] = decode_one_mcu(color_component_id=1)
+            for k in range(1, self.components_num):
+                self.mcus[i, j, k] = decode_one_mcu(color_component_id=k+1)
+                for voff, hoff in product(range(self.vertical_sampling_factor), range(self.horizontal_sampling_factor)):
+                    self.mcus[i+voff, j+hoff, k] = self.mcus[i, j, k]
         # print(np.max(self.mcus))
 
     def dequantize_mcu(self):
@@ -387,9 +406,11 @@ class JPGImage:
 
     def save(self):
         assert isinstance(self.mcus, np.ndarray)
-        save_bmp(self.mcus.transpose((0,3,1,4,2)).reshape((
+        data = self.mcus.transpose((0,3,1,4,2)).reshape((
             self.mcus.shape[0] * self.mcus.shape[3], self.mcus.shape[1] * self.mcus.shape[4], self.mcus.shape[2]
-            )))
+            ))
+        data = data[:self.height, :self.width, :]
+        save_bmp(data)
 
 @click.command()
 @click.argument('path', type=click.Path(exists=True, dir_okay=False, path_type=Path))
